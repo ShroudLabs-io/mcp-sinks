@@ -1,0 +1,330 @@
+# =============================================================================
+# mcp-sinks.yml  —  Semgrep ruleset for hunting vulnerabilities in MCP servers
+# -----------------------------------------------------------------------------
+# Two tiers:
+#   [INVENTORY]  high-recall pattern rules. Flag EVERY dangerous sink so you can
+#                eyeball whether a tool argument reaches it. Expect false
+#                positives — that is the point. WARNING severity.
+#   [TAINT]      MCP-aware taint rules. Source = MCP tool-handler arguments,
+#                sink = dangerous call. Higher precision, ERROR severity. These
+#                are the ones worth reproducing first. Taint breaks across the
+#                SDK/JSON boundary, so ABSENCE of a taint hit is NOT safety —
+#                always fall back to the inventory rules + manual tracing.
+#
+# Run:   semgrep --config mcp-sinks.yml <path-to-server-repo>
+#        semgrep --config mcp-sinks.yml --sarif -o out.sarif <repo>   (for GHSA)
+#        semgrep --config mcp-sinks.yml --severity ERROR <repo>       (taint only)
+#
+# Covers Python (official `mcp`/FastMCP SDK) and JS/TS (@modelcontextprotocol/sdk).
+# =============================================================================
+
+rules:
+
+# ------------------------------------------------------------------ #
+#  CLASS 1 — COMMAND INJECTION  (highest CVE hit-rate)               #
+# ------------------------------------------------------------------ #
+
+  - id: mcp-py-inventory-shell-exec
+    languages: [python]
+    severity: WARNING
+    message: >
+      [INVENTORY] Python shell/exec sink. If a tool argument reaches this
+      unsanitised, it is OS command injection. Trace the argument backwards.
+    metadata:
+      class: command-injection
+      cwe: "CWE-78"
+      owasp-mcp: "tool-execution-abuse"
+      tier: inventory
+    patterns:
+      - pattern-either:
+          - pattern: os.system(...)
+          - pattern: os.popen(...)
+          - pattern: subprocess.$F(..., shell=True, ...)
+          - pattern: subprocess.getoutput(...)
+          - pattern: subprocess.getstatusoutput(...)
+          - pattern: asyncio.create_subprocess_shell(...)
+          - pattern: $LOOP.subprocess_shell(...)
+          - pattern: pty.spawn(...)
+          - pattern: eval(...)
+          - pattern: exec(...)
+
+  - id: mcp-js-inventory-shell-exec
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: >
+      [INVENTORY] Node shell/exec sink. If a tool argument reaches this
+      unsanitised, it is OS command injection. Trace the argument backwards.
+    metadata:
+      class: command-injection
+      cwe: "CWE-78"
+      owasp-mcp: "tool-execution-abuse"
+      tier: inventory
+    patterns:
+      - pattern-either:
+          - pattern: $CP.exec(...)
+          - pattern: $CP.execSync(...)
+          - pattern: "$CP.spawn($X, ..., { ..., shell: true, ... })"
+          - pattern: "$CP.spawnSync($X, ..., { ..., shell: true, ... })"
+          - pattern: eval(...)
+          - pattern: new Function(...)
+          - pattern: $VM.runInContext(...)
+          - pattern: $VM.runInNewContext(...)
+
+  - id: mcp-py-taint-toolarg-to-shell
+    languages: [python]
+    severity: ERROR
+    mode: taint
+    message: >
+      [TAINT] MCP tool argument flows into a shell/exec sink -> command
+      injection (CWE-78). Confirm in a sandbox and file a GHSA.
+    metadata:
+      class: command-injection
+      cwe: "CWE-78"
+      tier: taint
+    pattern-sources:
+      # FastMCP: parameters of an @mcp.tool()-decorated function
+      - patterns:
+          - pattern-inside: |
+              @$MCP.tool(...)
+              def $FUNC(..., $ARG, ...):
+                  ...
+          - focus-metavariable: $ARG
+      - patterns:
+          - pattern-inside: |
+              @$MCP.tool(...)
+              async def $FUNC(..., $ARG, ...):
+                  ...
+          - focus-metavariable: $ARG
+      # Low-level Server.call_tool handler: the `arguments` dict
+      - patterns:
+          - pattern-inside: |
+              @$S.call_tool()
+              async def $FUNC(..., $ARG, ...):
+                  ...
+          - focus-metavariable: $ARG
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: os.system(...)
+              - pattern: os.popen(...)
+              - pattern: subprocess.$F(...)
+              - pattern: asyncio.create_subprocess_shell(...)
+              - pattern: eval(...)
+              - pattern: exec(...)
+    pattern-sanitizers:
+      - pattern: shlex.quote(...)
+
+  - id: mcp-js-taint-toolarg-to-shell
+    languages: [javascript, typescript]
+    severity: ERROR
+    mode: taint
+    message: >
+      [TAINT] MCP tool argument flows into a Node shell/exec sink -> command
+      injection (CWE-78). Confirm in a sandbox and file a GHSA.
+    metadata:
+      class: command-injection
+      cwe: "CWE-78"
+      tier: taint
+    pattern-sources:
+      # High-level: destructured args in server.tool / registerTool callback
+      - patterns:
+          - pattern-inside: |
+              $SRV.tool($NAME, $SCHEMA, async ($ARGS) => { ... })
+          - focus-metavariable: $ARGS
+      - patterns:
+          - pattern-inside: |
+              $SRV.registerTool($NAME, $CFG, async ($ARGS) => { ... })
+          - focus-metavariable: $ARGS
+      # Low-level: request.params.arguments in a CallTool handler
+      - pattern: $REQ.params.arguments
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $CP.exec(...)
+              - pattern: $CP.execSync(...)
+              - pattern: eval(...)
+              - pattern: new Function(...)
+
+# ------------------------------------------------------------------ #
+#  CLASS 2 — PATH TRAVERSAL / SANDBOX ESCAPE  (filesystem servers)   #
+# ------------------------------------------------------------------ #
+
+  - id: mcp-py-inventory-fs-path
+    languages: [python]
+    severity: WARNING
+    message: >
+      [INVENTORY] Filesystem sink. If a tool argument reaches the path without
+      realpath-canonicalisation + an allow-root containment check, it is path
+      traversal / symlink escape (the Filesystem-MCP bug class).
+    metadata:
+      class: path-traversal
+      cwe: "CWE-22"
+      tier: inventory
+    patterns:
+      - pattern-either:
+          - pattern: open(...)
+          - pattern: os.remove(...)
+          - pattern: os.unlink(...)
+          - pattern: os.rename(...)
+          - pattern: shutil.$F(...)
+          - pattern: pathlib.Path(...)
+      # de-noise: skip when a realpath/resolve containment check is right there
+    paths:
+      exclude:
+        - "*test*"
+        - "*spec*"
+
+  - id: mcp-js-inventory-fs-path
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: >
+      [INVENTORY] Filesystem sink. Check for path canonicalisation
+      (path.resolve + startsWith(allowedRoot)) before the fs call; symlink
+      following and '../' escapes are the CVE here.
+    metadata:
+      class: path-traversal
+      cwe: "CWE-22"
+      tier: inventory
+    patterns:
+      - pattern-either:
+          - pattern: $FS.readFile(...)
+          - pattern: $FS.readFileSync(...)
+          - pattern: $FS.writeFile(...)
+          - pattern: $FS.writeFileSync(...)
+          - pattern: $FS.createReadStream(...)
+          - pattern: $FS.unlink(...)
+          - pattern: $FS.unlinkSync(...)
+
+# ------------------------------------------------------------------ #
+#  CLASS 3 — SSRF  (fetch / scraper / screenshot / search servers)  #
+# ------------------------------------------------------------------ #
+
+  - id: mcp-py-inventory-ssrf
+    languages: [python]
+    severity: WARNING
+    message: >
+      [INVENTORY] Outbound HTTP sink. If the URL is a tool argument with no
+      allow-list / no block on link-local (169.254.169.254), loopback, and
+      file://, it is SSRF.
+    metadata:
+      class: ssrf
+      cwe: "CWE-918"
+      tier: inventory
+    patterns:
+      - pattern-either:
+          - pattern: requests.$M(...)
+          - pattern: urllib.request.urlopen(...)
+          - pattern: httpx.$M(...)
+          - pattern: aiohttp.ClientSession(...).$M(...)
+
+  - id: mcp-js-inventory-ssrf
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: >
+      [INVENTORY] Outbound HTTP sink. Check for URL allow-listing and
+      link-local/loopback/file:// blocking before the request.
+    metadata:
+      class: ssrf
+      cwe: "CWE-918"
+      tier: inventory
+    patterns:
+      - pattern-either:
+          - pattern: fetch(...)
+          - pattern: axios(...)
+          - pattern: axios.$M(...)
+          - pattern: got(...)
+          - pattern: $H.request(...)
+
+# ------------------------------------------------------------------ #
+#  CLASS 4 — SQL INJECTION  (database-backed servers)               #
+# ------------------------------------------------------------------ #
+
+  - id: mcp-py-inventory-sqli
+    languages: [python]
+    severity: WARNING
+    message: >
+      [INVENTORY] SQL executed from an interpolated/concatenated string.
+      Parameterise it; otherwise a tool argument = SQL injection.
+    metadata:
+      class: sql-injection
+      cwe: "CWE-89"
+      tier: inventory
+    patterns:
+      - pattern-either:
+          - pattern: $CUR.execute(f"...", ...)
+          - pattern: $CUR.execute("..." % ..., ...)
+          - pattern: $CUR.execute("...".format(...), ...)
+          - pattern: $CUR.execute($A + $B, ...)
+
+  - id: mcp-js-inventory-sqli
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: >
+      [INVENTORY] SQL built with a template literal / concatenation. Use
+      parameterised queries; otherwise a tool argument = SQL injection.
+    metadata:
+      class: sql-injection
+      cwe: "CWE-89"
+      tier: inventory
+    patterns:
+      - pattern-either:
+          - pattern: $DB.query(`...${...}...`, ...)
+          - pattern: $DB.query($A + $B, ...)
+
+# ------------------------------------------------------------------ #
+#  CLASS 5 — INSECURE DESERIALISATION                               #
+# ------------------------------------------------------------------ #
+
+  - id: mcp-py-inventory-deserialization
+    languages: [python]
+    severity: WARNING
+    message: >
+      [INVENTORY] Unsafe deserialisation sink. pickle/marshal/dill and
+      yaml.load without SafeLoader give RCE on attacker-controlled bytes.
+    metadata:
+      class: deserialization
+      cwe: "CWE-502"
+      tier: inventory
+    patterns:
+      - pattern-either:
+          - pattern: pickle.loads(...)
+          - pattern: pickle.load(...)
+          - pattern: marshal.loads(...)
+          - pattern: dill.loads(...)
+          - pattern: yaml.load(...)
+      - pattern-not: yaml.load(..., Loader=yaml.SafeLoader)
+      - pattern-not: yaml.load(..., Loader=SafeLoader)
+
+# ------------------------------------------------------------------ #
+#  CLASS 6 — TRANSPORT / AUTH HYGIENE  (audit flags, low precision) #
+# ------------------------------------------------------------------ #
+
+  - id: mcp-inventory-bind-all-interfaces
+    languages: [python, javascript, typescript]
+    severity: INFO
+    message: >
+      [AUDIT] Server binds to 0.0.0.0 / all interfaces. Combined with missing
+      Origin/Host validation this is the DNS-rebinding + 0.0.0.0-day surface
+      (CVE-2025-66414 class). Confirm the transport validates Origin.
+    metadata:
+      class: transport-exposure
+      cwe: "CWE-1327"
+      tier: audit
+    pattern-either:
+      - pattern: '"0.0.0.0"'
+      - pattern: "'0.0.0.0'"
+
+  - id: mcp-inventory-tls-verification-disabled
+    languages: [python, javascript, typescript]
+    severity: WARNING
+    message: >
+      [AUDIT] TLS verification disabled. On a proxy/bridge that connects to
+      remote MCP servers this widens the malicious-server threat model
+      (mcp-remote / CVE-2025-6514 class).
+    metadata:
+      class: tls
+      cwe: "CWE-295"
+      tier: audit
+    pattern-either:
+      - pattern: requests.$M(..., verify=False, ...)
+      - pattern: "{ ..., rejectUnauthorized: false, ... }"
