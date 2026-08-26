@@ -16,6 +16,33 @@
 #        semgrep --config mcp-sinks.yml --severity ERROR <repo>       (taint only)
 #
 # Covers Python (official `mcp`/FastMCP SDK) and JS/TS (@modelcontextprotocol/sdk).
+#
+# Changelog (from Layer 2 review against the mac-shell-mcp/cmd-line-mcp CVEs,
+# then a full 49-repo corpus scan):
+#   - mcp-js-inventory-exec-with-shell-option added: execFile/spawn look
+#     argv-safe but a `shell` option that isn't a literal `false` (a truthy
+#     string or variable, not just `true`) re-enables shell parsing. Missed
+#     entirely before — this is the actual mac-shell-mcp CVE-2026-2035922
+#     shape (`execFileAsync(cmd, args, { shell: this.shell })`).
+#   - mcp-py-audit-separator-missing-newline / mcp-js- equivalent added: a
+#     separator-check regex that enumerates |, ;, & but omits \n — POSIX
+#     shells treat a bare newline as a statement terminator identical to ';'.
+#     This is the cmd-line-mcp newline-bypass shape. The JS variant has a
+#     known false-positive mode: it can match `.match(someVariable)`/
+#     `.test(someVariable)` even though `/$REGEX/` is meant to require a
+#     regex literal — semgrep appears to bind the metavariable more loosely
+#     than expected here. Confirmed on mcp-gitlab-server's `log.match
+#     (errorLineRegex)`, unrelated to the bug this rule targets. Not yet
+#     fixed; treat JS hits from this rule with extra skepticism until it is.
+#   - mcp-js-inventory-shell-exec precision fix: `$CP.exec(...)`/
+#     `.execSync(...)` matched ANY receiver, and `.exec()` is also
+#     RegExp.prototype.exec() — every regex-based parser in a codebase
+#     tripped this rule. Across the 49-repo corpus scan this was ~61% of
+#     all shell-exec hits (42 of 69) on inspection. Now requires the
+#     receiver to look like child_process (`cp`/`child_process`/`proc`/
+#     `require("child_process")`); a bare destructured `exec(...)`/
+#     `execSync(...)` call (no receiver) is unambiguous and still matches
+#     unconstrained.
 # =============================================================================
 
 rules:
@@ -61,10 +88,28 @@ rules:
       tier: inventory
     patterns:
       - pattern-either:
-          - pattern: $CP.exec(...)
-          - pattern: $CP.execSync(...)
-          - pattern: "$CP.spawn($X, ..., { ..., shell: true, ... })"
-          - pattern: "$CP.spawnSync($X, ..., { ..., shell: true, ... })"
+          # $CP.exec/.execSync must look like child_process, not a bare
+          # `.exec()` — that's also RegExp.prototype.exec(), and matching
+          # any receiver made this fire on ordinary regex-parsing code
+          # (confirmed false positives on real repos: `tRegex.exec(...)`,
+          # `errorLineRegex` usage). Bare destructured `exec(...)` (no
+          # receiver, no dot) isn't ambiguous this way and needs no
+          # constraint — RegExp.exec always has a receiver.
+          - patterns:
+              - pattern-either:
+                  - pattern: $CP.exec(...)
+                  - pattern: $CP.execSync(...)
+              - metavariable-pattern:
+                  metavariable: $CP
+                  patterns:
+                    - pattern-either:
+                        - pattern: require("child_process")
+                        - pattern: require('child_process')
+                        - pattern-regex: "(?i)^(cp|child_process|childprocess|proc|nodecp)$"
+          - pattern: exec(...)
+          - pattern: execSync(...)
+          - pattern: "$CP2.spawn($X, ..., { ..., shell: true, ... })"
+          - pattern: "$CP2.spawnSync($X, ..., { ..., shell: true, ... })"
           - pattern: eval(...)
           - pattern: new Function(...)
           - pattern: $VM.runInContext(...)

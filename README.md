@@ -97,6 +97,30 @@ directly on a separator/dangerous-pattern regex that enumerates shell
 metacharacters without including `\n` — the exact shape of this bug,
 independent of which sink the validated string eventually reaches.
 
+### The 49-repo corpus pass: `.exec()` is also `RegExp.prototype.exec()`
+
+Ran the full ruleset against a 49-repo MCP server corpus as a Layer 2
+validation pass. 916 raw findings, all inventory/audit tier (0 taint hits —
+none of the 49 repos happened to have the narrow single-hop "tool arg
+straight into a sink" shape the taint rules require). Manually reviewing a
+sample of the 69 `mcp-js-inventory-shell-exec` hits turned up a real
+precision bug: `$CP.exec(...)`/`$CP.execSync(...)` matched *any* receiver,
+and `.exec()` is also `RegExp.prototype.exec()` — every regex-based parser
+in a codebase (`tRegex.exec(cellXml)`, log-line matchers, etc.) tripped
+this rule. On inspection, 42 of the 69 hits (~61%) were this false
+positive. Fixed by requiring the receiver to look like `child_process`
+(`cp`/`child_process`/`proc`/`require("child_process")`); a bare
+destructured `exec(...)`/`execSync(...)` call has no receiver to check and
+isn't ambiguous this way, so it still matches unconstrained.
+
+The same pass also caught a real precision issue in the *new*
+`mcp-js-audit-separator-missing-newline` rule: it fired on
+`log.match(errorLineRegex)` in an unrelated repo, where `errorLineRegex` is
+a plain variable, not an inline regex literal — `/$REGEX/` appears to bind
+more loosely than intended in that position. Documented as a known
+limitation in the ruleset's changelog rather than left silent; treat that
+rule's JS/TS hits with extra scrutiny until it's tightened.
+
 ## CVEs found with this tool
 
 - CVE-2026-2035922 (CVSS 9.3 Critical) — mac-shell-mcp

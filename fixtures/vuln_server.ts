@@ -50,3 +50,14 @@ function validateCommand(cmd: string): boolean {
   }
   return true;
 }
+
+// NOT command injection: .exec() is also RegExp.prototype.exec(). A generic
+// $CP.exec(...) pattern without a receiver check fires on any regex-based
+// parser -- confirmed on real code (mcp-gitlab-server's log-line regex).
+function extractLines(text: string): string[] {
+  const lineRegex = /^.*$/gm;
+  const out: string[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = lineRegex.exec(text)) !== null) out.push(m[0]);
+  return out;
+}
