@@ -340,6 +340,45 @@ rules:
           - pattern: $FS.unlink(...)
           - pattern: $FS.unlinkSync(...)
 
+  # A containment check that compares a resolved path against an allowed
+  # root with startsWith() but no separator boundary: "/tmp-evil" passes
+  # startsWith("/tmp") even though it's a sibling directory, not a child.
+  # Confirmed real (not just theoretical) on open-dedalus's
+  # file-operations-mcp: isPathAllowed() calls exactly this shape before
+  # every readFile/writeFile/delete, so the containment check exists and
+  # is called correctly, but doesn't actually contain. It also never calls
+  # fs.realpath(), so it isn't symlink-safe either.
+  #
+  # $ARG must not be a string literal (excludes unrelated startsWith() uses
+  # like `entry.startsWith('.')` for hidden-file filtering — .startsWith()
+  # is an ordinary String method, not path-specific, so an unconstrained
+  # pattern here is as noisy as the .exec()/RegExp collision was) and must
+  # not already end with a separator (path.sep, "/", or '/').
+  - id: mcp-js-path-traversal-startswith-no-sep
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >
+      Path containment check uses startsWith() without a path-separator
+      boundary. "/tmp-evil" passes startsWith("/tmp") even though it's a
+      sibling directory, not a child of the allowed root. Use
+      startsWith(allowed + path.sep), or path.relative(allowed, resolved)
+      and check the result doesn't start with '..' / isn't absolute.
+    metadata:
+      class: path-traversal
+      cwe: "CWE-22"
+      tier: audit
+      references:
+        - "open-dedalus/file-operations-mcp client.ts:28"
+    patterns:
+      - pattern: $RESOLVED.startsWith($ARG)
+      - metavariable-pattern:
+          metavariable: $ARG
+          patterns:
+            - pattern-not-regex: "^['\"`]"
+            - pattern-not: $X + path.sep
+            - pattern-not: $X + "/"
+            - pattern-not: $X + '/'
+
 # ------------------------------------------------------------------ #
 #  CLASS 3 — SSRF  (fetch / scraper / screenshot / search servers)  #
 # ------------------------------------------------------------------ #

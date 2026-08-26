@@ -61,3 +61,22 @@ function extractLines(text: string): string[] {
   while ((m = lineRegex.exec(text)) !== null) out.push(m[0]);
   return out;
 }
+
+// path traversal: startsWith() with no separator boundary -- "/tmp-evil"
+// passes startsWith("/tmp") even though it's a sibling, not a child. The
+// real open-dedalus/file-operations-mcp shape (client.ts:28), called
+// correctly before every read/write/delete but not actually containing.
+function isPathAllowed(resolvedPath: string, resolvedAllowed: string): boolean {
+  return resolvedPath.startsWith(resolvedAllowed);
+}
+
+// NOT path traversal: .startsWith() is an ordinary String method, not
+// path-specific -- this is hidden-file filtering, unrelated to containment.
+function isHiddenEntry(entry: string): boolean {
+  return entry.startsWith(".");
+}
+
+// NOT path traversal: separator-qualified, so "/tmp-evil" no longer passes.
+function isPathAllowedSafe(resolvedPath: string, resolvedAllowed: string): boolean {
+  return resolvedPath.startsWith(resolvedAllowed + path.sep);
+}

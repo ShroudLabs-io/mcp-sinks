@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """
 Self-test: confirm mcp-sinks.yml fires the expected finding count against
-fixtures/. Guards the README's "Expected: 18 findings, including 3 TAINT
+fixtures/. Guards the README's "Expected: 19 findings, including 4 ERROR
 hits" claim against silent drift as rules are added or tightened.
+
+ERROR severity now covers both the 3 taint rules and high-confidence audit
+rules like mcp-js-path-traversal-startswith-no-sep — not "taint" alone.
 
 Usage:
     python scripts/check_fixtures.py
@@ -16,8 +19,8 @@ ROOT = Path(__file__).resolve().parent.parent
 RULES = ROOT / "mcp-sinks.yml"
 FIXTURES = ROOT / "fixtures"
 
-EXPECTED_TOTAL = 18
-EXPECTED_TAINT = 3
+EXPECTED_TOTAL = 19
+EXPECTED_ERROR = 4
 
 
 def main():
@@ -28,18 +31,18 @@ def main():
     )
     data = json.loads(r.stdout)
     results = data["results"]
-    taint = [res for res in results if res["extra"]["severity"] == "ERROR"]
+    errors = [res for res in results if res["extra"]["severity"] == "ERROR"]
 
     print(f"total findings: {len(results)} (expected {EXPECTED_TOTAL})")
-    print(f"taint (ERROR) findings: {len(taint)} (expected {EXPECTED_TAINT})")
+    print(f"ERROR-severity findings: {len(errors)} (expected {EXPECTED_ERROR})")
     for res in results:
         print(f"  {res['check_id'].split('.')[-1]:<42} "
               f"{res['extra']['severity']:<8} "
               f"{res['path']}:{res['start']['line']}")
 
-    if len(results) != EXPECTED_TOTAL or len(taint) != EXPECTED_TAINT:
+    if len(results) != EXPECTED_TOTAL or len(errors) != EXPECTED_ERROR:
         print("\nFAIL: finding count drifted from the README's self-test claim.")
-        print("Update EXPECTED_TOTAL/EXPECTED_TAINT here AND the README together.")
+        print("Update EXPECTED_TOTAL/EXPECTED_ERROR here AND the README together.")
         sys.exit(1)
     print("\nOK")
 

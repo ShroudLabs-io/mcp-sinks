@@ -59,7 +59,7 @@ semgrep --config mcp-sinks.yml fixtures/
 python scripts/check_fixtures.py
 ```
 
-Expected: 18 findings, including 3 TAINT hits.
+Expected: 19 findings, including 4 ERROR-severity hits.
 
 ## Two cases worth knowing about
 
@@ -121,10 +121,45 @@ more loosely than intended in that position. Documented as a known
 limitation in the ruleset's changelog rather than left silent; treat that
 rule's JS/TS hits with extra scrutiny until it's tightened.
 
+### The file-operations-mcp case: `startsWith()` isn't `path.relative()`
+
+Narrowing the corpus pass's `mcp-js-inventory-fs-path`/`-ssrf` hits to
+files that actually register MCP tools (not build scripts, tests, or
+examples) and manually reviewing the highest-concentration ones surfaced a
+confirmed path-traversal bug in `open-dedalus`'s `file-operations-mcp`
+sub-package:
+
+```ts
+private isPathAllowed(filePath: string): boolean {
+    const resolvedPath = path.resolve(this.workingDirectory, filePath);
+    return this.allowedPaths.some(allowedPath => {
+        const resolvedAllowed = path.resolve(allowedPath);
+        return resolvedPath.startsWith(resolvedAllowed);
+    });
+}
+```
+
+Called correctly before every `readFile`/`writeFile`/`delete` — the
+containment check exists and is wired up — but `startsWith()` has no
+path-segment boundary, so `/tmp-evil/secret` passes
+`startsWith("/tmp")` even though it's a sibling directory, not a child.
+It's also not symlink-safe (`path.resolve` only does lexical
+normalisation; nothing calls `fs.realpath`).
+
+`mcp-js-path-traversal-startswith-no-sep` fires on this exact shape.
+`.startsWith()` is an ordinary String method — not path-specific — so an
+unconstrained pattern here would have the same false-positive problem as
+the `.exec()`/RegExp collision above (confirmed: it would have also fired
+on `entry.startsWith('.')`, a hidden-file filter, elsewhere in the same
+file). The rule requires the comparison argument not be a string literal
+and not already be separator-qualified (`+ path.sep`, `+ "/"`, `+ '/'`).
+
 ## CVEs found with this tool
 
 - CVE-2026-2035922 (CVSS 9.3 Critical) — mac-shell-mcp
 - cmd-line-mcp (CVE pending) — newline separator bypass
+- open-dedalus/file-operations-mcp (CVE pending) — path-traversal via
+  unqualified `startsWith()` containment check
 
 ## Background
 
