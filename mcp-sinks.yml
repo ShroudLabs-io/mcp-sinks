@@ -70,6 +70,106 @@ rules:
           - pattern: $VM.runInContext(...)
           - pattern: $VM.runInNewContext(...)
 
+  # execFile/spawn look safe (argv array, no shell by default) but a `shell`
+  # option key with ANY truthy value — not just the literal `true` above —
+  # re-enables shell interpretation of the joined command line. A string
+  # (a shell path) or a variable/property access (shell: this.shell) both
+  # count. This is the mac-shell-mcp CVE-2026-2035922 shape: `execFileAsync
+  # (command, args, { shell: this.shell })` where `this.shell` defaults to
+  # '/bin/zsh' — always truthy, so the "safe" execFile call always runs
+  # through a shell anyway, and array-arg quoting no longer protects it.
+  - id: mcp-js-inventory-exec-with-shell-option
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: >
+      [INVENTORY] execFile/spawn with a `shell` option that isn't a literal
+      `false`. Any truthy value here (true, a shell path string, or a
+      variable) makes Node run the command through a shell, so the argv-array
+      quoting this API is normally chosen for no longer applies. Confirm the
+      value can never be truthy at runtime, or that args are still sanitised
+      against shell metacharacters.
+    metadata:
+      class: command-injection
+      cwe: "CWE-78"
+      owasp-mcp: "tool-execution-abuse"
+      tier: inventory
+      references:
+        - "mac-shell-mcp CVE-2026-2035922"
+    patterns:
+      - pattern-either:
+          - pattern: "$CP.execFile($CMD, $ARGS, { ..., shell: $SHELL, ... })"
+          - pattern: "$CP.execFileSync($CMD, $ARGS, { ..., shell: $SHELL, ... })"
+          - pattern: "$CP.spawn($CMD, $ARGS, { ..., shell: $SHELL, ... })"
+          - pattern: "$CP.spawnSync($CMD, $ARGS, { ..., shell: $SHELL, ... })"
+          - pattern: "execFile($CMD, $ARGS, { ..., shell: $SHELL, ... })"
+          - pattern: "execFileSync($CMD, $ARGS, { ..., shell: $SHELL, ... })"
+          - pattern: "execFileAsync($CMD, $ARGS, { ..., shell: $SHELL, ... })"
+          - pattern: "spawn($CMD, $ARGS, { ..., shell: $SHELL, ... })"
+          - pattern: "spawnSync($CMD, $ARGS, { ..., shell: $SHELL, ... })"
+      - metavariable-pattern:
+          metavariable: $SHELL
+          patterns:
+            - pattern-not: "false"
+
+  # A command-separator/dangerous-character check that enumerates shell
+  # metacharacters but omits \n (and \r): POSIX shells treat a bare newline
+  # as a statement terminator identical to ';', so a validator that blocks
+  # "cmd1; cmd2" but not "cmd1\ncmd2" is bypassed by embedding the second
+  # command on a new line. This is the cmd-line-mcp newline-separator bypass:
+  # `re.search(r"[|;&]", command)` gates chaining but the character class
+  # never includes \n, so a payload command with an embedded newline sails
+  # through unvalidated and then runs via /bin/sh anyway.
+  - id: mcp-py-audit-separator-missing-newline
+    languages: [python]
+    severity: WARNING
+    message: >
+      [AUDIT] Shell-separator/dangerous-pattern regex does not include \n.
+      A POSIX shell treats a bare newline as a statement separator identical
+      to ';' — if this regex gates command chaining before the string reaches
+      a shell, an embedded newline bypasses it. Add \n (and \r) to the
+      character class, or reject newlines outright.
+    metadata:
+      class: command-injection
+      cwe: "CWE-78"
+      tier: audit
+      references:
+        - "cmd-line-mcp newline separator bypass"
+    patterns:
+      - pattern-either:
+          - pattern: re.search($PATTERN, ...)
+          - pattern: re.match($PATTERN, ...)
+          - pattern: re.fullmatch($PATTERN, ...)
+          - pattern: re.findall($PATTERN, ...)
+      - metavariable-regex:
+          metavariable: $PATTERN
+          regex: '.*[|;&].*'
+      - metavariable-pattern:
+          metavariable: $PATTERN
+          patterns:
+            - pattern-not-regex: '.*\\n.*'
+
+  - id: mcp-js-audit-separator-missing-newline
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: >
+      [AUDIT] Shell-separator regex does not include \n. A POSIX shell treats
+      a bare newline as a statement separator identical to ';' — if this
+      regex gates command chaining before the string reaches a shell, an
+      embedded newline bypasses it (the cmd-line-mcp finding). Add \n (and
+      \r) to the character class, or reject newlines outright.
+    metadata:
+      class: command-injection
+      cwe: "CWE-78"
+      tier: audit
+      references:
+        - "cmd-line-mcp newline separator bypass"
+    patterns:
+      - pattern-either:
+          - pattern: "/$REGEX/.test($STR)"
+          - pattern: "$STR.match(/$REGEX/)"
+      - pattern-regex: '\[[^\]]*[|;&][^\]]*\]'
+      - pattern-not-regex: '\\n'
+
   - id: mcp-py-taint-toolarg-to-shell
     languages: [python]
     severity: ERROR
